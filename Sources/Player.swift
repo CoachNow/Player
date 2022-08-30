@@ -28,6 +28,7 @@ import UIKit
 import Foundation
 import AVFoundation
 import CoreGraphics
+//import AWSCore
 
 // MARK: - error types
 
@@ -373,7 +374,15 @@ open class Player: UIViewController {
 
     // Boolean that determines if the user or calling coded has trigged autoplay manually.
     internal var _hasAutoplayActivated: Bool = true
-
+    
+    //Smooth scrolling vars
+    internal var isSeekInProgress = false
+    internal var chaseTime = CMTime.zero
+    internal var playerCurrentItemStatus : AVPlayerItem.Status = .unknown
+    internal var smoothSeekCompletionHandler : ((Bool) -> ())? = nil
+    internal var pausePlayTimeObserve = false
+    internal var observedPlayerTime : CGFloat = 0.0
+    
     // MARK: - object lifecycle
 
     public convenience init() {
@@ -506,7 +515,9 @@ extension Player {
     fileprivate func play() {
         if self.autoplay || self._hasAutoplayActivated {
             self.playbackState = .playing
-            self._avplayer.playImmediately(atRate: rate)
+            self.pausePlayTimeObserve = true
+            self._avplayer.play()
+//            self._avplayer.playImmediately(atRate: rate)
         }
     }
 
@@ -531,6 +542,52 @@ extension Player {
         self.playbackDelegate?.playerPlaybackDidEnd(self)
     }
 
+    /// Updates playback to the specified time in seconds.
+    ///
+    /// - Parameters:
+    ///   - time: The time to switch to move the playback.
+    ///   - completionHandler: Call block handler after seeking/
+    open func seek(seconds time: CGFloat, completionHandler: ((Bool) -> ())? = nil) {
+        let timeScale = _playerItem?.asset.duration.timescale ?? CMTimeScale(1.0)
+        let cmTime = CMTimeMakeWithSeconds(time, preferredTimescale: timeScale)
+        smoothSeekCompletionHandler = completionHandler
+        seekSmoothlyToTime(newChaseTime: cmTime)
+    }
+    
+    private func seekSmoothlyToTime(newChaseTime: CMTime) {
+        pause()
+        if CMTimeCompare(newChaseTime, chaseTime) != 0 {
+            chaseTime = newChaseTime;
+            if !isSeekInProgress {
+                trySeekToChaseTime()
+            }
+        }
+    }
+    
+    private func trySeekToChaseTime() {
+        if playerCurrentItemStatus == .unknown {
+            // wait until item becomes ready (KVO player.currentItem.status)
+        } else if playerCurrentItemStatus == .readyToPlay {
+            actuallySeekToTime(time : chaseTime)
+        }
+    }
+    
+    private func actuallySeekToTime(time : CMTime) {
+        isSeekInProgress = true
+        let seekTimeInProgress = chaseTime
+        _avplayer.seek(to: seekTimeInProgress, toleranceBefore: CMTime.zero, toleranceAfter: CMTime.zero) {
+            [weak self] finished in
+            guard let self = self else { return }
+            
+            if CMTimeCompare(seekTimeInProgress, self.chaseTime) == 0 {
+                self.isSeekInProgress = false
+                self.smoothSeekCompletionHandler?(finished)
+            } else {
+                self.trySeekToChaseTime()
+            }
+        }
+    }
+    
     /// Updates playback to the specified time.
     ///
     /// - Parameters:
@@ -694,6 +751,7 @@ extension Player {
             self.addPlayerItemObservers()
             NotificationCenter.default.addObserver(self, selector: #selector(playerItemDidPlayToEndTime(_:)), name: .AVPlayerItemDidPlayToEndTime, object: updatedPlayerItem)
             NotificationCenter.default.addObserver(self, selector: #selector(playerItemFailedToPlayToEndTime(_:)), name: .AVPlayerItemFailedToPlayToEndTime, object: updatedPlayerItem)
+//            self.addStatusObserver()
         }
 
         self._avplayer.replaceCurrentItem(with: self._playerItem)
@@ -802,6 +860,10 @@ extension Player {
             }
         })
 
+        self._playerItemObservers.append(playerItem.observe(\.status, options: [.initial, .new]) { [weak self] (object, change) in
+            self?.playerCurrentItemStatus = object.status
+        })
+        
         self._playerItemObservers.append(playerItem.observe(\.isPlaybackLikelyToKeepUp, options: [.new, .old]) { [weak self] (object, change) in
             guard let strongSelf = self else {
                 return
@@ -879,10 +941,15 @@ extension Player {
 
     internal func addPlayerObservers() {
         self._playerTimeObserver = self._avplayer.addPeriodicTimeObserver(forInterval: CMTimeMake(value: 1, timescale: 100), queue: DispatchQueue.main, using: { [weak self] timeInterval in
-            guard let strongSelf = self else {
-                return
+            guard let self = self else { return }
+            let currentTime = CMTimeGetSeconds(timeInterval)
+            if currentTime >= self.observedPlayerTime {
+                self.pausePlayTimeObserve = false
             }
-            strongSelf.playbackDelegate?.playerCurrentTimeDidChange(strongSelf)
+            if (!self.pausePlayTimeObserve) {
+                self.observedPlayerTime = currentTime
+                self.playbackDelegate?.playerCurrentTimeDidChange(self)
+            }
         })
 
         if #available(iOS 10.0, tvOS 10.0, *) {
