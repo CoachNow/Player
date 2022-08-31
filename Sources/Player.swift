@@ -379,7 +379,6 @@ open class Player: UIViewController {
     internal var isSeekInProgress = false
     internal var chaseTime = CMTime.zero
     internal var playerCurrentItemStatus : AVPlayerItem.Status = .unknown
-    internal var smoothSeekCompletionHandler : ((Bool) -> ())? = nil
     internal var pausePlayTimeObserve = false
     internal var observedPlayerTime : CGFloat = 0.0
     
@@ -517,7 +516,6 @@ extension Player {
             self.playbackState = .playing
             self.pausePlayTimeObserve = true
             self._avplayer.play()
-//            self._avplayer.playImmediately(atRate: rate)
         }
     }
 
@@ -550,29 +548,28 @@ extension Player {
     open func seek(seconds time: CGFloat, completionHandler: ((Bool) -> ())? = nil) {
         let timeScale = _playerItem?.asset.duration.timescale ?? CMTimeScale(1.0)
         let cmTime = CMTimeMakeWithSeconds(time, preferredTimescale: timeScale)
-        smoothSeekCompletionHandler = completionHandler
-        seekSmoothlyToTime(newChaseTime: cmTime)
+        seekSmoothlyToTime(newChaseTime: cmTime, completionHandler: completionHandler)
     }
     
-    private func seekSmoothlyToTime(newChaseTime: CMTime) {
+    private func seekSmoothlyToTime(newChaseTime: CMTime, completionHandler: ((Bool) -> ())? = nil) {
         pause()
         if CMTimeCompare(newChaseTime, chaseTime) != 0 {
             chaseTime = newChaseTime;
             if !isSeekInProgress {
-                trySeekToChaseTime()
+                trySeekToChaseTime(completionHandler: completionHandler)
             }
         }
     }
     
-    private func trySeekToChaseTime() {
+    private func trySeekToChaseTime(completionHandler: ((Bool) -> ())? = nil) {
         if playerCurrentItemStatus == .unknown {
             // wait until item becomes ready (KVO player.currentItem.status)
         } else if playerCurrentItemStatus == .readyToPlay {
-            actuallySeekToTime(time : chaseTime)
+            actuallySeekToTime(time : chaseTime, completionHandler: completionHandler)
         }
     }
     
-    private func actuallySeekToTime(time : CMTime) {
+    private func actuallySeekToTime(time : CMTime, completionHandler: ((Bool) -> ())? = nil) {
         isSeekInProgress = true
         let seekTimeInProgress = chaseTime
         _avplayer.seek(to: seekTimeInProgress, toleranceBefore: CMTime.zero, toleranceAfter: CMTime.zero) {
@@ -581,9 +578,10 @@ extension Player {
             
             if CMTimeCompare(seekTimeInProgress, self.chaseTime) == 0 {
                 self.isSeekInProgress = false
-                self.smoothSeekCompletionHandler?(finished)
+                self.observedPlayerTime = CMTimeGetSeconds(self.chaseTime)
+                completionHandler?(finished)
             } else {
-                self.trySeekToChaseTime()
+                self.trySeekToChaseTime(completionHandler: completionHandler)
             }
         }
     }
@@ -594,6 +592,7 @@ extension Player {
     ///   - time: The time to switch to move the playback.
     ///   - completionHandler: Call block handler after seeking/
     open func seek(to time: CMTime, completionHandler: ((Bool) -> Swift.Void)? = nil) {
+        self.observedPlayerTime = CMTimeGetSeconds(time)
         if let playerItem = self._playerItem {
             return playerItem.seek(to: time, completionHandler: completionHandler)
         } else {
